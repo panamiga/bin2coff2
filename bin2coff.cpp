@@ -29,20 +29,12 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
-#if !defined(_MSC_VER)
 #include <stdint.h>
-#else
-typedef signed char          int8_t;
-typedef unsigned char        uint8_t;
-typedef short                int16_t;
-typedef unsigned short       uint16_t;
-typedef int                  int32_t;
-typedef unsigned             uint32_t;
-typedef long long            int64_t;
-typedef unsigned long long   uint64_t;
-#endif
 
-#define SIZE_LABEL_SUFFIX				 "_size"
+#include <string>
+#include <vector>
+#include <iostream>
+
 #define SIZE_TYPE						 uint32_t
 
 #define IMAGE_SIZEOF_SHORT_NAME			 8
@@ -115,9 +107,9 @@ typedef unsigned long long   uint64_t;
 #define IMAGE_SCN_MEM_WRITE				 0x80000000
 
 /* Symbol entry defines */
-#define IMAGE_SYM_UNDEFINED				 (int16_t)0
-#define IMAGE_SYM_ABSOLUTE				 (int16_t)-1
-#define IMAGE_SYM_DEBUG					 (int16_t)-2
+#define IMAGE_SYM_UNDEFINED				 ((int16_t)0)
+#define IMAGE_SYM_ABSOLUTE				 ((int16_t)-1)
+#define IMAGE_SYM_DEBUG					 ((int16_t)-2)
 
 #define IMAGE_SYM_TYPE_NULL				 0x0000
 #define IMAGE_SYM_TYPE_VOID				 0x0001
@@ -142,7 +134,7 @@ typedef unsigned long long   uint64_t;
 #define IMAGE_SYM_DTYPE_FUNCTION		 2
 #define IMAGE_SYM_DTYPE_ARRAY			 3
 
-#define IMAGE_SYM_CLASS_END_OF_FUNCTION	 (uint8_t)-1
+#define IMAGE_SYM_CLASS_END_OF_FUNCTION	 0xFF
 #define IMAGE_SYM_CLASS_NULL			 0x00
 #define IMAGE_SYM_CLASS_AUTOMATIC		 0x01
 #define IMAGE_SYM_CLASS_EXTERNAL		 0x02
@@ -319,10 +311,12 @@ main (int argc, char *argv[])
 
 	/* Populate data section */
 	if (fread(&buffer[sizeof(IMAGE_FILE_HEADER) + sizeof(IMAGE_SECTION_HEADER)], 1, size, fd) != size) {
-		fprintf(stderr, "Couldn't read file '%s'.\n", argv[1]);
-		goto err;
+		std::cerr << "Couldn't read file '" << argv[1] << "'." << std::endl;
+		return 1;
 	}
-	fclose(fd); fd = NULL;
+	fclose(fd);
+    fd = NULL;
+    
 	data_size = (SIZE_TYPE*)&buffer[sizeof(IMAGE_FILE_HEADER) + sizeof(IMAGE_SECTION_HEADER) + size];
 	*data_size = (SIZE_TYPE)size;
 
@@ -371,20 +365,18 @@ main (int argc, char *argv[])
 
 	fd = fopen(argv[2], "wb");
 	if (fd == NULL) {
-		fprintf(stderr, "Couldn't create file '%s'.\n", argv[2]);
-		goto err;
+		std::cerr << "Couldn't create file '" << argv[1] << "'." << std::endl;
+		return 1;
 	}
 
 	if (fwrite(buffer, 1, alloc_size, fd) != alloc_size) {
-		fprintf(stderr, "Couldn't write file '%s'.\n", argv[2]);
-		goto err;
+		std::cerr << "Couldn't write file '" << argv[1] << "'." << std::endl;
+		return 1;
 	}
-	printf("Successfully created COFF object file '%s'\n", argv[2]);
+    
+	std::cout << "Successfully created COFF object file '" << argv[1] << "'." << std::endl;
+    std::cout << "extern char " << start_label.substr(1, start_label.length() - 6) << "   /* the first char of binary data */" << std::endl;
+    std::cout << "extern char " << stop_label.substr(1, stop_label.length() - 6) << "   /* the last char of binary data */" << std::endl;
 
-	r = 0;
-
-err:
-	if (fd != NULL) fclose(fd);
-	free(buffer);
-	exit(r);
+	return 0;
 }
