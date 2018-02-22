@@ -27,14 +27,15 @@
  * http://pierrelib.pagesperso-orange.fr/exec_formats/MS_Symbol_Type_v1.0.pdf
  */
 
-#include <stdio.h>
+
 #include <string.h>
-#include <stdlib.h>
 #include <stdint.h>
 
 #include <string>
 #include <vector>
 #include <iostream>
+#include <fstream>
+#include <cctype>
 
 #define SIZE_TYPE						 uint32_t
 
@@ -217,10 +218,6 @@ typedef struct {
 
 int main (int argc, char *argv[])
 {
-	int i;
-
-	size_t size, alloc_size;
-	
 	IMAGE_FILE_HEADER* file_header;
 	IMAGE_SECTION_HEADER* section_header;
 	IMAGE_SYMBOL* symbol_table;
@@ -229,7 +226,7 @@ int main (int argc, char *argv[])
 
 	if (argc != 3) {
 		std::cerr << "\nUsage: bin2coff2 outfile.o infile\n\n";
-        std::cerr << "  outfile.o  : target object file, in MS COFF format.\n";
+        std::cerr << "  outfile.o  : target object file, in MS COFF format\n";
 		std::cerr << "  infile     : source binary data\n";        
 		std::cerr << "This tool do the same as ld -r -b binary -o outfile.o infile do but for MSVC\n";
         std::cerr << "Access from C source is:\n\n";
@@ -246,60 +243,70 @@ int main (int argc, char *argv[])
         return 1;
     }
     
-    std::string lbl(argv[2]);
-    for(char &c: lbl) // Mangle
+    std::ofstream dest(argv[1], std::ios::binary);
+    if (!dest) 
+    {
+		 std::cerr << "Couldn't open file '" << argv[1] << "' for writing." << std::endl;
+		 return 1;
+	}
+    
+    std::ifstream source(argv[2], std::ios::binary | std::ios::ate);        
+	if (!source) 
+    {
+		 std::cerr << "Couldn't open file '" << argv[2] << "'." << std::endl;
+		 return 1;
+	}
+    
+    size_t size = source.tellg();
+    source.seekg(0);
+
+    /* Mangle source filename */
+    std::string label(argv[2]);
+    for(char &c: label)
     {
         c = std::isalnum(c) ? c : '_';
     }
     
-    std::string start_label = std::string("?_binary_") + lbl + "_start@@3DB";
-    std::string stop_label = std::string("?_binary_") + lbl + "_end@@3DB";
-        
-	FILE *fd = fopen(argv[2], "rb");
-	if (fd == NULL) {
-		std::cerr << "Couldn't open file '" << argv[1] << "'." << std::endl;
-		return 1;
-	}
-	fseek(fd, 0, SEEK_END);
-	size = (size_t)ftell(fd);
-	fseek(fd, 0, SEEK_SET);
+    std::string start_label = std::string("?_binary_") + label + "_start@@3DB";
+    std::string stop_label = std::string("?_binary_") + label + "_end@@3DB";
     
-	alloc_size = sizeof(IMAGE_FILE_HEADER) + sizeof(IMAGE_SECTION_HEADER) + size + sizeof(SIZE_TYPE) + 2*sizeof(IMAGE_SYMBOL) + sizeof(IMAGE_STRINGS);
-    
+    /* Allocate buffer and set data pointers */
+	size_t alloc_size = sizeof(IMAGE_FILE_HEADER) + sizeof(IMAGE_SECTION_HEADER) + sizeof(SIZE_TYPE) + 2*sizeof(IMAGE_SYMBOL) + sizeof(IMAGE_STRINGS);    
     alloc_size += start_label.length() + 1;
-	alloc_size += stop_label.length() + 1;
-	
+	alloc_size += stop_label.length() + 1;	
+    
     std::vector<uint8_t> buf(alloc_size, 0);
-	uint8_t* buffer = buf.data();  
-
-	file_header = (IMAGE_FILE_HEADER*)&buffer[0];
-	section_header = (IMAGE_SECTION_HEADER*)&buffer[sizeof(IMAGE_FILE_HEADER)];
-	symbol_table = (IMAGE_SYMBOL*)&buffer[sizeof(IMAGE_FILE_HEADER) + sizeof(IMAGE_SECTION_HEADER) + size + sizeof(SIZE_TYPE)];
-	string_table = (IMAGE_STRINGS*)&buffer[sizeof(IMAGE_FILE_HEADER) + sizeof(IMAGE_SECTION_HEADER) + size + sizeof(SIZE_TYPE) + 2*sizeof(IMAGE_SYMBOL)];
+	uint8_t* buffer = buf.data();  	
+	
+	file_header = (IMAGE_FILE_HEADER*)buffer;	
+	buffer += sizeof(IMAGE_FILE_HEADER);
+	
+	section_header = (IMAGE_SECTION_HEADER*)buffer;
+	buffer += sizeof(IMAGE_SECTION_HEADER);
+	
+    data_size = (SIZE_TYPE*)buffer;
+	buffer += sizeof(SIZE_TYPE);
+	
+	symbol_table = (IMAGE_SYMBOL*)buffer;
+	buffer += 2*sizeof(IMAGE_SYMBOL);
+	
+	string_table = (IMAGE_STRINGS*)buffer;
 
 	/* Populate file header */
 	file_header->Machine = IMAGE_FILE_MACHINE_ANY;
 	file_header->NumberOfSections = 1;
-	file_header->PointerToSymbolTable = sizeof(IMAGE_FILE_HEADER) + sizeof(IMAGE_SECTION_HEADER) + (uint32_t)size+4;
+	file_header->PointerToSymbolTable = sizeof(IMAGE_FILE_HEADER) + sizeof(IMAGE_SECTION_HEADER) + (uint32_t)size + 4;
 	file_header->NumberOfSymbols = 2;
 	file_header->Characteristics = IMAGE_FILE_LINE_NUMS_STRIPPED;
 
 	/* Populate data section header */
 	strncpy(section_header->Name, ".data", IMAGE_SIZEOF_SHORT_NAME);
-	section_header->SizeOfRawData = (uint32_t)size+4;
+	section_header->SizeOfRawData = (uint32_t)size + 4;
 	section_header->PointerToRawData = sizeof(IMAGE_FILE_HEADER) + sizeof(IMAGE_SECTION_HEADER);
 	section_header->Characteristics = IMAGE_SCN_CNT_INITIALIZED_DATA | IMAGE_SCN_ALIGN_16BYTES | IMAGE_SCN_MEM_READ | IMAGE_SCN_MEM_WRITE;
 
-	/* Populate data section */
-	if (fread(&buffer[sizeof(IMAGE_FILE_HEADER) + sizeof(IMAGE_SECTION_HEADER)], 1, size, fd) != size) {
-		std::cerr << "Couldn't read file '" << argv[1] << "'." << std::endl;
-		return 1;
-	}
-	fclose(fd);
-    fd = NULL;
-    
-	data_size = (SIZE_TYPE*)&buffer[sizeof(IMAGE_FILE_HEADER) + sizeof(IMAGE_SECTION_HEADER) + size];
-	*data_size = (SIZE_TYPE)size;
+    /* Set data size */
+    *data_size = (SIZE_TYPE)size;
 
 	/* Populate symbol table */
     symbol_table[0].N.LongName.Zeroes = 0;
@@ -311,7 +318,6 @@ int main (int argc, char *argv[])
 	symbol_table[0].StorageClass = IMAGE_SYM_CLASS_EXTERNAL;
 	symbol_table[0].SectionNumber = 1;
 	symbol_table[0].Value = 0;				/* Offset within the section */
-
 
     symbol_table[1].N.LongName.Zeroes = 0;
     symbol_table[1].N.LongName.Offset = sizeof(IMAGE_STRINGS) + (uint32_t)start_label.length() + 1;
@@ -330,21 +336,32 @@ int main (int argc, char *argv[])
     strcpy(&string_table->Strings[string_table->TotalSize - sizeof(IMAGE_STRINGS)], stop_label.c_str());
     string_table->TotalSize += (uint32_t)stop_label.length() + 1;
     
-	
-	fd = fopen(argv[1], "wb");
-	if (fd == NULL) {
-		std::cerr << "Couldn't create file '" << argv[1] << "'." << std::endl;
-		return 1;
-	}
-
-	if (fwrite(buffer, 1, alloc_size, fd) != alloc_size) {
-		std::cerr << "Couldn't write file '" << argv[1] << "'." << std::endl;
-		return 1;
-	}
+    /* Finally write the data */
+    dest.write((char*)file_header, sizeof(IMAGE_FILE_HEADER));
+    dest.write((char*)section_header, sizeof(IMAGE_SECTION_HEADER));
     
-	std::cout << "Successfully created COFF object file '" << argv[1] << "'." << std::endl;
-    std::cout << "extern char " << start_label.substr(1, start_label.length() - 6) << "   /* the first char of binary data */" << std::endl;
-    std::cout << "extern char " << stop_label.substr(1, stop_label.length() - 6) << "   /* the last char of binary data */" << std::endl;
+    dest << source.rdbuf();
+    
+    dest.write((char*)data_size, sizeof(SIZE_TYPE));
+    dest.write((char*)symbol_table, 2*sizeof(IMAGE_SYMBOL));
+    dest.write((char*)string_table, string_table->TotalSize);
+    
+    source.close();
+    dest.close();
+    
+    if(source && dest)
+    {    
+        std::cout << "Successfully created COFF object file '" << argv[1] << "'." << std::endl;
+        std::cout << "extern char " << start_label.substr(1, start_label.length() - 6) << "   /* the first char of binary data */" << std::endl;
+        std::cout << "extern char " << stop_label.substr(1, stop_label.length() - 6) << "   /* the last char of binary data */" << std::endl;
 
-	return 0;
+        return 0;
+    } 
+    else 
+    {
+        std::cerr << "Failed to create COFF object file '" << argv[1] << "'." << std::endl;
+        return 1;
+    }
+        
 }
+
