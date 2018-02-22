@@ -1,7 +1,7 @@
 /*
- * bin2coff: converts a data object into a Win32 linkable COFF binary object
- * Copyright (c) 2011 Pete Batard <pete@akeo.ie>
- * This file is part of the libwdi project: http://libwdi.sf.net
+ * bin2coff2: converts a data object into a Win32 linkable COFF binary object
+ * like ld -r -o binary outfile.o infile does.
+ * Copyright (c) 2017-2018 panamiga <el_@inbox.ru>
  *
  * This program is free software: you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -19,6 +19,7 @@
 
 /* 
  * References:
+ * http://pete.akeo.ie/2011/11/bin2coff.html (base of this)
  * http://www.vortex.masmcode.com/ (another bin2coff, without source)
  * http://msdn.microsoft.com/en-us/library/ms680198.aspx
  * http://webster.cs.ucr.edu/Page_TechDocs/pe.txt
@@ -214,90 +215,70 @@ typedef struct {
 
 #pragma pack(pop)
 
-int
-#ifdef DDKBUILD
-__cdecl
-#endif
-main (int argc, char *argv[])
+int main (int argc, char *argv[])
 {
-	const uint16_t endian_test = 0xBE00;
-	int x86_32, short_label, short_size;
-	int i, r = 1;
-	char* label;
-	FILE *fd = NULL;
+	int i;
+
 	size_t size, alloc_size;
-	uint8_t* buffer = NULL;
+	
 	IMAGE_FILE_HEADER* file_header;
 	IMAGE_SECTION_HEADER* section_header;
 	IMAGE_SYMBOL* symbol_table;
 	IMAGE_STRINGS* string_table;
 	SIZE_TYPE* data_size;
 
-	if ((argc < 3) || (argc > 5)) {
-		fprintf(stderr, "\nUsage: bin2coff bin obj [label] [64bit]\n\n");
-		fprintf(stderr, "  bin  : source binary data\n");
-		fprintf(stderr, "  obj  : target object file, in MS COFF format.\n");
-		fprintf(stderr, "  label: identifier for the extern data. If not provided, the name of the\n");
-		fprintf(stderr, "         binary file without extension is used.\n");
-		fprintf(stderr, "  64bit: produce a 64 bit compatible object - symbols are generated without\n");
-		fprintf(stderr, "         leading underscores and machine type is set to x86_x64.\n\n");
-		fprintf(stderr, "With your linker set properly, typical access from a C source is:\n\n");
-		fprintf(stderr, "    extern uint8_t  label[]     /* binary data         */\n");
-		fprintf(stderr, "    extern uint32_t label_size  /* size of binary data */\n\n");
-		exit(1);
+	if (argc != 3) {
+		std::cerr << "\nUsage: bin2coff2 outfile.o infile\n\n";
+        std::cerr << "  outfile.o  : target object file, in MS COFF format.\n";
+		std::cerr << "  infile     : source binary data\n";        
+		std::cerr << "This tool do the same as ld -r -b binary -o outfile.o infile do but for MSVC\n";
+        std::cerr << "Access from C source is:\n\n";
+		std::cerr << "    extern char _binary_*MANGLED_PATH*_start   /* the first char of binary data */\n";
+		std::cerr << "    extern char _binary_*MANGLED_PATH*_end     /* the last char of binary data */\n\n";
+		return 1;
 	}
 
-	if (((uint8_t*)&endian_test)[0] == 0xBE) {
-		fprintf(stderr, "\nThis program is not compatible with Big Endian architectures.\n");
-		fprintf(stderr, "You are welcome to modify the sourcecode (GPLv3+) to make it so.\n");
-		exit(1);
-	}
-
-	fd = fopen(argv[1], "rb");
+    const uint16_t endian_test = 0xBE00;
+    if (((uint8_t*)&endian_test)[0] == 0xBE) 
+    {
+        std::cerr << "\nThis program is not compatible with Big Endian architectures." << std::endl;
+        std::cerr << "You are welcome to modify the sourcecode (GPLv3+) to make it so." << std::endl;
+        return 1;
+    }
+    
+    std::string lbl(argv[2]);
+    for(char &c: lbl) // Mangle
+    {
+        c = std::isalnum(c) ? c : '_';
+    }
+    
+    std::string start_label = std::string("?_binary_") + lbl + "_start@@3DB";
+    std::string stop_label = std::string("?_binary_") + lbl + "_end@@3DB";
+        
+	FILE *fd = fopen(argv[2], "rb");
 	if (fd == NULL) {
-		fprintf(stderr, "Couldn't open file '%s'.\n", argv[1]);
-		goto err;
+		std::cerr << "Couldn't open file '" << argv[1] << "'." << std::endl;
+		return 1;
 	}
 	fseek(fd, 0, SEEK_END);
 	size = (size_t)ftell(fd);
 	fseek(fd, 0, SEEK_SET);
-
-	x86_32 = (((argc >= 4) && (strcmp(argv[3], "64bit") == 0)) || ((argc >= 5) && (strcmp(argv[4], "64bit") == 0)))?0:1;
-
-	/* Label setup */
-	if ( (argc < 4) || ((argc == 4) && (!x86_32)) ) {
-		for (i=(int)strlen(argv[1])-1; i>=0; i--) {
-			if (argv[1][i] == '.') {
-				argv[1][i] = 0;
-				break;
-			}
-		}
-		label = argv[1];
-	} else {
-		label = argv[3];
-	}
-	short_label = (strlen(label) + x86_32) <= IMAGE_SIZEOF_SHORT_NAME;
-	short_size = (strlen(label) + x86_32 + strlen(SIZE_LABEL_SUFFIX)) <= IMAGE_SIZEOF_SHORT_NAME;
+    
 	alloc_size = sizeof(IMAGE_FILE_HEADER) + sizeof(IMAGE_SECTION_HEADER) + size + sizeof(SIZE_TYPE) + 2*sizeof(IMAGE_SYMBOL) + sizeof(IMAGE_STRINGS);
-	if (!short_label) {
-		alloc_size += x86_32 + strlen(label) + 1;
-	}
-	if (!short_size) {
-		alloc_size += x86_32 + strlen(label) + strlen(SIZE_LABEL_SUFFIX) + 1;
-	}
+    
+    alloc_size += start_label.length() + 1;
+	alloc_size += stop_label.length() + 1;
+	
+    std::vector<uint8_t> buf(alloc_size, 0);
+	uint8_t* buffer = buf.data();  
 
-	buffer = (uint8_t*)calloc(alloc_size, 1);
-	if (buffer == NULL) {
-		fprintf(stderr, "Couldn't allocate buffer.\n");
-		goto err;
-	}
 	file_header = (IMAGE_FILE_HEADER*)&buffer[0];
 	section_header = (IMAGE_SECTION_HEADER*)&buffer[sizeof(IMAGE_FILE_HEADER)];
 	symbol_table = (IMAGE_SYMBOL*)&buffer[sizeof(IMAGE_FILE_HEADER) + sizeof(IMAGE_SECTION_HEADER) + size + sizeof(SIZE_TYPE)];
 	string_table = (IMAGE_STRINGS*)&buffer[sizeof(IMAGE_FILE_HEADER) + sizeof(IMAGE_SECTION_HEADER) + size + sizeof(SIZE_TYPE) + 2*sizeof(IMAGE_SYMBOL)];
 
 	/* Populate file header */
-	file_header->Machine = (x86_32)?IMAGE_FILE_MACHINE_I386:IMAGE_FILE_MACHINE_AMD64;
+	file_header->Machine = IMAGE_FILE_MACHINE_ANY;
 	file_header->NumberOfSections = 1;
 	file_header->PointerToSymbolTable = sizeof(IMAGE_FILE_HEADER) + sizeof(IMAGE_SECTION_HEADER) + (uint32_t)size+4;
 	file_header->NumberOfSymbols = 2;
@@ -321,13 +302,9 @@ main (int argc, char *argv[])
 	*data_size = (SIZE_TYPE)size;
 
 	/* Populate symbol table */
-	if (short_label) {
-		symbol_table[0].N.ShortName[0] = '_';
-		strcpy(&symbol_table[0].N.ShortName[x86_32], label);
-	} else {
-		symbol_table[0].N.LongName.Zeroes = 0;
-		symbol_table[0].N.LongName.Offset = sizeof(IMAGE_STRINGS);
-	}
+    symbol_table[0].N.LongName.Zeroes = 0;
+    symbol_table[0].N.LongName.Offset = sizeof(IMAGE_STRINGS);
+	
 	/* Ideally, we would use (IMAGE_SYM_DTYPE_ARRAY << 8) | IMAGE_SYM_TYPE_BYTE
 	 * to indicate an array of bytes, but the type is ignored in MS objects. */
 	symbol_table[0].Type = IMAGE_SYM_TYPE_NULL;
@@ -335,14 +312,10 @@ main (int argc, char *argv[])
 	symbol_table[0].SectionNumber = 1;
 	symbol_table[0].Value = 0;				/* Offset within the section */
 
-	if (short_size) {
-		symbol_table[1].N.ShortName[1] = '_';
-		strcpy(&symbol_table[1].N.ShortName[x86_32], label);
-		strcpy(&symbol_table[1].N.ShortName[x86_32+strlen(label)], SIZE_LABEL_SUFFIX);
-	} else {
-		symbol_table[1].N.LongName.Zeroes = 0;
-		symbol_table[1].N.LongName.Offset = sizeof(IMAGE_STRINGS) + ((short_label)?0:(x86_32 + (uint32_t)strlen(label) + 1));
-	}
+
+    symbol_table[1].N.LongName.Zeroes = 0;
+    symbol_table[1].N.LongName.Offset = sizeof(IMAGE_STRINGS) + (uint32_t)start_label.length() + 1;
+	
 	symbol_table[1].Type = IMAGE_SYM_TYPE_NULL;
 	symbol_table[1].StorageClass = IMAGE_SYM_CLASS_EXTERNAL;
 	symbol_table[1].SectionNumber = 1;
@@ -350,20 +323,15 @@ main (int argc, char *argv[])
 
 	/* Populate string table */
 	string_table->TotalSize = sizeof(IMAGE_STRINGS);
-	if (!short_label) {
-		string_table->Strings[0] = '_';
-		strcpy(&string_table->Strings[0] + x86_32, label);
-		string_table->TotalSize += x86_32 + (uint32_t)strlen(label) + 1;
-	}
-	if (!short_size) {
-		string_table->Strings[string_table->TotalSize - sizeof(IMAGE_STRINGS)] = '_';
-		strcpy(&string_table->Strings[string_table->TotalSize - sizeof(IMAGE_STRINGS)] + x86_32, label);
-		string_table->TotalSize += x86_32 + (uint32_t)strlen(label);
-		strcpy(&string_table->Strings[string_table->TotalSize - sizeof(IMAGE_STRINGS)], SIZE_LABEL_SUFFIX);
-		string_table->TotalSize += (uint32_t)strlen(SIZE_LABEL_SUFFIX) + 1;
-	}
-
-	fd = fopen(argv[2], "wb");
+			
+    strcpy(string_table->Strings, start_label.c_str());
+    string_table->TotalSize += (uint32_t)start_label.length() + 1;	
+    
+    strcpy(&string_table->Strings[string_table->TotalSize - sizeof(IMAGE_STRINGS)], stop_label.c_str());
+    string_table->TotalSize += (uint32_t)stop_label.length() + 1;
+    
+	
+	fd = fopen(argv[1], "wb");
 	if (fd == NULL) {
 		std::cerr << "Couldn't create file '" << argv[1] << "'." << std::endl;
 		return 1;
